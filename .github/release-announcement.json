@@ -1,0 +1,10 @@
+{
+  "version": "0.58.0",
+  "highlights": [
+    "Start a workflow from a GitHub issue, comment, pull request or failed check, and let it comment, label or review on GitHub.",
+    "A joined server opens much faster: the agents and sidebar from your last visit show at once while the app connects.",
+    "On the web, a switch to another server takes about 1 second.",
+    "Marketplace has 17 new OpenBot agents, such as QA Tester, PR Shepherd and Chief of Staff.",
+    "You can move queued messages in a queue of more than 32 messages."
+  ]
+}

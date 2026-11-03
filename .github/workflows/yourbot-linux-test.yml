@@ -1,0 +1,147 @@
+name: YourBot Linux x64 test build
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag, or commit to build (empty = selected ref)"
+        required: false
+        default: ""
+        type: string
+      verify_launch:
+        description: "Launch the packaged application under Xvfb"
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: yourbot-linux-test-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build YourBot AppImage Linux x64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      # This build is a desktop artifact only. It must never enable hosted servers or receive
+      # production/provider credentials.
+      HOSTED_SERVERS_ENABLED: "false"
+      BOAT_API_KEY: ""
+      BOAT_TEMPLATE_API_KEY: ""
+      BOAT_WEBHOOK_SECRET: ""
+      BREVO_API_KEY: ""
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+
+      - name: Set up Bun and install dependencies
+        uses: ./.github/actions/setup-bun
+
+      - name: Install Linux verification tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes apparmor fuse3 xvfb
+
+      # These runtimes are part of the official Linux release recipe and are downloaded from their
+      # pinned artifacts. No provider or application secret is needed for these downloads.
+      - name: Install pinned provider runtimes
+        run: |
+          bun scripts/install-codex-runtime.ts linux x64
+          bun scripts/install-claude-runtime.ts linux x64
+          bun scripts/install-grok-runtime.ts linux x64
+
+      - name: Build AppImage
+        run: bun run dist:linux
+
+      - name: Assert package contains no environment files
+        run: |
+          set -euo pipefail
+          leaked=$(find dist -type f \( -name '.env' -o -name '.env.*' \) -print -quit)
+          if [ -n "$leaked" ]; then
+            echo "An environment file was included in the packaged output: $leaked" >&2
+            exit 1
+          fi
+
+      - name: Verify packaged application
+        if: inputs.verify_launch
+        run: |
+          set -euo pipefail
+          sudo chown root:root dist/linux-unpacked/chrome-sandbox
+          sudo chmod 4755 dist/linux-unpacked/chrome-sandbox
+          sudo tee /etc/apparmor.d/openbot-verify >/dev/null <<PROFILE
+          abi <abi/4.0>,
+          include <tunables/global>
+
+          profile openbot-verify "$GITHUB_WORKSPACE/dist/linux-unpacked/openbot" flags=(unconfined) {
+            userns,
+          }
+          PROFILE
+          sudo apparmor_parser -r /etc/apparmor.d/openbot-verify
+          xvfb-run -a bun run verify:package:linux dist/linux-unpacked --require-update-metadata
+
+      - name: Verify AppImage and generate SHA-256
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          app_images=(dist/*.AppImage)
+          if [ "${#app_images[@]}" -ne 1 ]; then
+            echo "Expected exactly one Linux x64 AppImage." >&2
+            exit 1
+          fi
+          if [ ! -x "${app_images[0]}" ]; then
+            echo "The AppImage is not executable." >&2
+            exit 1
+          fi
+          test -f dist/latest-linux.yml
+          grep -Fq ".AppImage" dist/latest-linux.yml
+          sha256sum "${app_images[0]}" > dist/SHA256SUMS-linux-x64.txt
+          cat dist/SHA256SUMS-linux-x64.txt
+
+      - name: Verify AppImage mounts with FUSE 3
+        run: |
+          set -euo pipefail
+          app_image=$(echo dist/*.AppImage)
+          headers=$(readelf --program-headers "$app_image")
+          if grep -Fq "program interpreter" <<<"$headers"; then
+            echo "The AppImage runtime is not static." >&2
+            exit 1
+          fi
+          output=$(mktemp)
+          "$app_image" --appimage-mount >"$output" &
+          runtime=$!
+          trap 'kill "$runtime" 2>/dev/null || true; fusermount3 -u "$(head -n 1 "$output" 2>/dev/null)" 2>/dev/null || true; rm -f "$output"' EXIT
+          for _ in $(seq 1 60); do
+            [ -s "$output" ] && break
+            sleep 1
+          done
+          mount_point=$(head -n 1 "$output")
+          test -n "$mount_point"
+          test -x "$mount_point/openbot"
+
+      - name: Confirm no credential values were provided to the build
+        run: |
+          set -euo pipefail
+          test "${HOSTED_SERVERS_ENABLED}" = "false"
+          test -z "${BOAT_API_KEY}"
+          test -z "${BOAT_TEMPLATE_API_KEY}"
+          test -z "${BOAT_WEBHOOK_SECRET}"
+          test -z "${BREVO_API_KEY}"
+          echo "No Boat or Brevo secret was injected into the build job."
+
+      - name: Upload test artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: yourbot-linux-x64-${{ github.sha }}
+          path: |
+            dist/*.AppImage
+            dist/SHA256SUMS-linux-x64.txt
+          if-no-files-found: error
+          retention-days: 7
