@@ -74,6 +74,7 @@ jobs:
           chmod 0755 \
             scripts/hosting/openbot \
             scripts/hosting/openbot-boat-pre-stop \
+            scripts/hosting/openbot-container \
             scripts/hosting/openbot-hosted-env \
             scripts/hosting/openbot-hosted-server \
             scripts/hosting/openbot-hosted-update \
