@@ -1,0 +1,62 @@
+# First isolated YourBot/OpenBot VPS environment.
+#
+# This file runs the official self-hosted Docker image. It does not set
+# OPENBOT_HOSTED_SERVER and does not use Boat Cloud credentials.
+#
+# The seccomp profile is reused from ../../docker/seccomp.json. Keep it beside
+# the repository checkout, or copy that file with this Compose file on the VPS.
+services:
+  openbot:
+    image: "${OPENBOT_IMAGE:?Set OPENBOT_IMAGE}:${OPENBOT_TAG:?Set OPENBOT_TAG}"
+    container_name: "${OPENBOT_CONTAINER_NAME:-yourbot-openbot-prototype}"
+    restart: unless-stopped
+    init: false
+    security_opt:
+      - seccomp=${OPENBOT_SECCOMP_PROFILE:-../../docker/seccomp.json}
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    shm_size: "${OPENBOT_SHM_SIZE:-1g}"
+    stop_grace_period: 60s
+    cpus: "${OPENBOT_CPUS:-2.0}"
+    mem_limit: "${OPENBOT_MEMORY:-8g}"
+    memswap_limit: "${OPENBOT_MEMORY:-8g}"
+    pids_limit: "${OPENBOT_PIDS:-8192}"
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 524288
+    tmpfs:
+      - /tmp:exec,mode=1777,size=${OPENBOT_TMP:-4g}
+      - /var/tmp:exec,mode=1777,size=1g
+      - /run/lock:mode=1777,size=1m
+      - /run/openbot:mode=0700,uid=1000,gid=1000,size=64m
+    volumes:
+      - openbot-data:/data
+    environment:
+      OPENBOT_DISPLAY_SIZE: "${OPENBOT_DISPLAY_SIZE:-1280x800}"
+      # Set this only when YourBot uses a self-hosted Account API.
+      OPENBOT_AUTH_API_URL: "${OPENBOT_AUTH_API_URL:-}"
+    networks:
+      - openbot-egress
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /run/openbot/control.sock && openbot status >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+volumes:
+  openbot-data:
+    name: "${OPENBOT_VOLUME_NAME:-yourbot-openbot-prototype-data}"
+
+networks:
+  openbot-egress:
+    name: "${OPENBOT_NETWORK_NAME:-yourbot-openbot-prototype}"
+    driver: bridge

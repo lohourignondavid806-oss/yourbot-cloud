@@ -1,0 +1,218 @@
+name: OpenBot Docker AMD64
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/openbot-docker-ghcr.yml"
+      - ".github/actions/**"
+      - "docker/**"
+      - "build/**"
+      - "resources/**"
+      - "scripts/**"
+      - "src/**"
+      - "packages/**"
+      - "patches/**"
+      - "vendor/**"
+      - "electron-builder.yml"
+      - "electron.vite.config.ts"
+      - "native-runtime.lock.json"
+      - "provider-runtime-blocklist.json"
+      - "bunfig.toml"
+      - ".nvmrc"
+      - "package.json"
+      - "bun.lock"
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish the tested image to GHCR"
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: openbot-docker-amd64-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: Build and test Docker image (linux/amd64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Bun and install dependencies
+        uses: ./.github/actions/setup-bun
+
+      - name: Install Linux verification tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes apparmor fuse3 xvfb
+
+      # These runtimes and the x64 remote-desktop runtime are packaged by dist:linux. No provider
+      # credential or Boat secret is needed to build the image.
+      - name: Install pinned provider runtimes
+        run: |
+          bun scripts/install-codex-runtime.ts linux x64
+          bun scripts/install-claude-runtime.ts linux x64
+          bun scripts/install-grok-runtime.ts linux x64
+
+      - name: Build the Linux AppImage
+        run: bun run dist:linux
+
+      - name: Verify the Linux package
+        run: |
+          sudo chown root:root dist/linux-unpacked/chrome-sandbox
+          sudo chmod 4755 dist/linux-unpacked/chrome-sandbox
+          sudo tee /etc/apparmor.d/openbot-ghcr-verify >/dev/null <<PROFILE
+          abi <abi/4.0>,
+          include <tunables/global>
+
+          profile openbot-ghcr-verify "$GITHUB_WORKSPACE/dist/linux-unpacked/openbot" flags=(unconfined) {
+            userns,
+          }
+          PROFILE
+          sudo apparmor_parser -r /etc/apparmor.d/openbot-ghcr-verify
+          xvfb-run -a bun run verify:package:linux dist/linux-unpacked --require-update-metadata
+
+      - name: Read the OpenBot version
+        id: version
+        shell: bash
+        run: |
+          version=$(node -p "require('./package.json').version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare the Docker build context
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p image
+          app_image=(dist/*.AppImage)
+          test "${#app_image[@]}" -eq 1
+          cp "${app_image[0]}" image/OpenBot.AppImage
+
+      - name: Build the AMD64 image on the GitHub runner
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker build --platform linux/amd64 \
+            --file docker/Dockerfile \
+            --build-arg "VERSION=$VERSION" \
+            --build-arg "REVISION=$GITHUB_SHA" \
+            --tag openbot:ci \
+            image
+
+      - name: Start and stop the image smoke test
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          cleanup() {
+            docker rm --force openbot-ghcr-ci >/dev/null 2>&1 || true
+          }
+          trap 'docker logs openbot-ghcr-ci 2>/dev/null || true; cleanup' ERR EXIT
+          docker run --detach --name openbot-ghcr-ci --shm-size 1g \
+            --security-opt seccomp=docker/seccomp.json \
+            --security-opt no-new-privileges:true \
+            --cap-drop ALL \
+            openbot:ci
+
+          status=
+          for _ in $(seq 1 120); do
+            if docker exec openbot-ghcr-ci test -S /run/openbot/control.sock; then
+              status=$(docker exec openbot-ghcr-ci openbot status)
+              grep -Fq "Account: loading" <<<"$status" || break
+            fi
+            sleep 1
+          done
+          echo "$status"
+          grep -Fxq "OpenBot $VERSION" <<<"$status"
+          grep -Fxq "Account: signed out. Sign in with: openbot login" <<<"$status"
+          docker stop --time 60 openbot-ghcr-ci
+          test "$(docker inspect openbot-ghcr-ci --format '{{.State.ExitCode}}')" = 0
+          trap - ERR EXIT
+          cleanup
+
+      - name: Save the tested image as a workflow artifact
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$VERSION" > docker-version.txt
+          docker save openbot:ci | gzip --fast > openbot-image-amd64.tar.gz
+
+      - name: Upload the tested image
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: openbot-docker-amd64
+          path: |
+            openbot-image-amd64.tar.gz
+            docker-version.txt
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  publish:
+    name: Publish tested image to GHCR
+    needs: build-test
+    if: >-
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish == true)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+    env:
+      GHCR_IMAGE: ghcr.io/${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download the tested image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: openbot-docker-amd64
+
+      - name: Push image tags to GHCR
+        id: push
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="${GHCR_IMAGE,,}"
+          version=$(cat docker-version.txt)
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          gunzip --stdout openbot-image-amd64.tar.gz | docker load
+          docker tag openbot:ci "$image:$version"
+          docker tag openbot:ci "$image:sha-${GITHUB_SHA::7}"
+          docker tag openbot:ci "$image:latest"
+          docker push "$image:$version"
+          docker push "$image:sha-${GITHUB_SHA::7}"
+          docker push "$image:latest"
+          digest=$(docker buildx imagetools inspect "$image:$version" --format '{{json .Manifest}}' | jq -r '.digest')
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "image=$image:$version" >> "$GITHUB_STEP_SUMMARY"
+          echo "digest=$digest" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Attest the published image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.GHCR_IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
