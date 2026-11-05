@@ -68,6 +68,17 @@ jobs:
           bun scripts/install-claude-runtime.ts linux x64
           bun scripts/install-grok-runtime.ts linux x64
 
+      - name: Normalize hosted script permissions
+        run: |
+          set -euo pipefail
+          chmod 0755 \
+            scripts/hosting/openbot \
+            scripts/hosting/openbot-boat-pre-stop \
+            scripts/hosting/openbot-hosted-env \
+            scripts/hosting/openbot-hosted-server \
+            scripts/hosting/openbot-hosted-update \
+            scripts/hosting/openbot-server-setup
+
       - name: Build the Linux AppImage
         run: bun run dist:linux
 
@@ -207,6 +218,8 @@ jobs:
           digest=$(docker buildx imagetools inspect "$image:$version" --format '{{json .Manifest}}' | jq -r '.digest')
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "Published image: $image:$version"
+          echo "Published digest: $digest"
           echo "image=$image:$version" >> "$GITHUB_STEP_SUMMARY"
           echo "digest=$digest" >> "$GITHUB_STEP_SUMMARY"
 
