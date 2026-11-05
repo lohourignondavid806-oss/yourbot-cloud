@@ -140,7 +140,6 @@ jobs:
           docker run --detach --name openbot-ghcr-ci --shm-size 1g \
             --security-opt seccomp=docker/seccomp.json \
             --security-opt no-new-privileges:true \
-            --cap-drop ALL \
             openbot:ci
 
           status=

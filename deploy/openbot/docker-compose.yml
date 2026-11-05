@@ -14,8 +14,6 @@ services:
     security_opt:
       - seccomp=${OPENBOT_SECCOMP_PROFILE:-../../docker/seccomp.json}
       - no-new-privileges:true
-    cap_drop:
-      - ALL
     read_only: true
     shm_size: "${OPENBOT_SHM_SIZE:-1g}"
     stop_grace_period: 60s
